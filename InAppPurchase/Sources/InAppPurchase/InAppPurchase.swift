@@ -20,15 +20,13 @@ let OK:Int = 0
 class InAppPurchase:RefCounted {
 	enum InAppPurchaseStatus:Int {
 		case purchaseOK = 0
-		case purchaseSuccessfulButUnverified = 2
-		case purchasePendingAuthorization = 3
-		case purchaseCancelledByUser = 4
-	}
-	enum InAppPurchaseError:Int, Error {
-		case failedToGetProducts = 1
-		case purchaseFailed = 2
-		case noSuchProduct = 3
-		case failedToRestorePurchases = 4
+		case purchaseSuccessfulButUnverified = 1
+		case purchasePendingAuthorization = 2
+		case purchaseCancelledByUser = 3
+		case failedToGetProducts = 4
+		case purchaseFailed = 5
+		case noSuchProduct = 6
+		case failedToRestorePurchases = 7
 	}
 
 	#signal("product_purchased", arguments: ["product_id": String.self])
@@ -56,14 +54,18 @@ class InAppPurchase:RefCounted {
 	}
 
 	@Callable
-	func initialize(_ productIdentifiers:[String]) {
+	func initialize(_ productIdentifiers:[String], onError:Callable) {
 		self.productIdentifiers = productIdentifiers
 
 		updateListenerTask = self.listenForTransactions()
-		
+
 		Task {
-			await updateProducts()
-			await updateProductStatus()
+			do {
+				await try updateProducts()
+				await try updateProductStatus()
+			} catch {
+				onError.callDeferred(Variant("IAP Failed updating products and product status, error: \(error)"))
+			}
 		}
 	}
 
@@ -79,24 +81,42 @@ class InAppPurchase:RefCounted {
 						let transaction: Transaction = try checkVerified(verification)
 						await transaction.finish()
 
-						onComplete.callDeferred(Variant(InAppPurchaseStatus.purchaseOK.rawValue))
+						onComplete.callDeferred(
+							Variant(InAppPurchaseStatus.purchaseOK.rawValue),
+							Variant(verification.payloadData.base64EncodedString()), 
+							Variant()
+						)
 						break
 					case .pending:
 						// Transaction waiting on authentication or approval
-						onComplete.callDeferred(Variant(InAppPurchaseStatus.purchasePendingAuthorization.rawValue))
+						onComplete.callDeferred(
+							Variant(InAppPurchaseStatus.purchasePendingAuthorization.rawValue),
+							Variant(),
+							Variant()
+						)
 						break
 					case .userCancelled:
 						// User cancelled the purchase
-						onComplete.callDeferred(Variant(InAppPurchaseStatus.purchaseCancelledByUser.rawValue))
+						onComplete.callDeferred(
+							Variant(InAppPurchaseStatus.purchaseCancelledByUser.rawValue),
+							Variant(),
+							Variant()
+						)
 						break;
 					}
 				} else {
-					GD.pushError("IAP Product doesn't exist: \(productIdentifier)")
-					onComplete.callDeferred(Variant(InAppPurchaseError.noSuchProduct.rawValue))
+					onComplete.callDeferred(
+						Variant(InAppPurchaseStatus.noSuchProduct.rawValue),
+						Variant(),
+						Variant("IAP Product doesn't exist: \(productIdentifier)")
+					)
 				}
 			} catch {
-				GD.pushError("IAP Failed to get products from App Store, error: \(error)")
-				onComplete.callDeferred(Variant(InAppPurchaseError.purchaseFailed.rawValue))
+				onComplete.callDeferred(
+					Variant(InAppPurchaseStatus.purchaseFailed.rawValue),
+					Variant(),
+					Variant("IAP Failed to get products from App Store, error: \(error)")
+				)
 			}
 		}
 	}
@@ -132,11 +152,14 @@ class InAppPurchase:RefCounted {
 						product.type = IAPProduct.TYPE_UNKNOWN
 					}
 					
-					onComplete.callDeferred(Variant(OK), Variant(products))
+					onComplete.callDeferred(Variant(OK), Variant(products), Variant())
 				}
 			} catch {
-				GD.pushError("Failed to get products from App Store, error: \(error)")
-				onComplete.callDeferred(Variant(InAppPurchaseError.failedToGetProducts.rawValue), Variant())
+				onComplete.callDeferred(
+					Variant(InAppPurchaseStatus.failedToGetProducts.rawValue),
+					Variant(),
+					Variant("Failed to get products from App Store, error: \(error)")
+				)
 			}
 		}
 	}
@@ -146,10 +169,15 @@ class InAppPurchase:RefCounted {
 		Task {
 			do {
 				try await AppStore.sync()
-				onComplete.callDeferred(Variant(OK))
+				onComplete.callDeferred(
+					Variant(OK),
+					Variant()
+				)
 			} catch {
-				GD.pushError("Failed to restore purchases: \(error)")
-				onComplete.callDeferred(Variant(InAppPurchaseError.failedToRestorePurchases.rawValue))
+				onComplete.callDeferred(
+					Variant(InAppPurchaseStatus.failedToRestorePurchases.rawValue),
+					Variant("Failed to restore purchases: \(error)")
+				)
 			}
 		}
 	}
@@ -158,22 +186,13 @@ class InAppPurchase:RefCounted {
 
 	func getProduct(_ productIdentifier:String) async throws -> Product? {
 		var product:[Product] = []
-		do {
-			product = try await Product.products(for: ["identifier"])
-		} catch {
-			GD.pushError("Unable to get product with identifier: \(productIdentifier): \(error)")
-		}
-
+		product = try await Product.products(for: ["identifier"])
 		return product.first
 	}
 
-	func updateProducts() async {
-		do {
-			let storeProducts = try await Product.products(for: productIdentifiers)
-			products = storeProducts
-		} catch {
-			GD.pushError("Failed to get products from App Store: \(error)")
-		}
+	func updateProducts() async throws {
+		let storeProducts = try await Product.products(for: productIdentifiers)
+		products = storeProducts
 	}
 
 	func updateProductStatus() async {
